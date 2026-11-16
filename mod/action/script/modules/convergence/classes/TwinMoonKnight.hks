@@ -1,0 +1,337 @@
+-- Twin Moon Knight / Cavaleiro das Luas Gemeas (Convergence Rework): mecanica Lua e Chama alternadas.
+-- Toda magia da escola tem parte de lua e parte de chama; a "abertura" diz qual vem primeiro (Magic.subCategory1:
+-- 29 = abre com Lua, 30 = abre com Chama). Lancar uma que abre com Lua deixa a proxima que abre com Chama +20%
+-- (Brasa Desperta) e vice-versa (Luar Desperto); 4 conjuracoes seguidas alternando ligam as Luas Gemeas (toda a
+-- escola +10%, 20 s). Habilidades das armas da classe (e da Sword of Night and Flame / Rellana's Twin Blades) contam
+-- pela abertura delas. Liga com a Jewel of the Twin Moons ou com o selo/armas da classe na mao (efeito residente).
+Jewel_of_the_Twin_Moons = 392700
+local TWINMOON_GATE = 9600000            -- residente do selo e das armas da classe
+local TWINMOON_MOON_READY = 9600001   -- Luar Desperto: proxima que abre com Lua +20% (subcat. 29)
+local TWINMOON_FLAME_READY = 9600002  -- Brasa Desperta: proxima que abre com Chama +20% (subcat. 30)
+local TWINMOON_TWIN = 9600003            -- Luas Gemeas: subcat. 29 e 30 +10%
+local TWINMOON_CLEAR_DELAY = 2          -- s: o bonus usado sai depois que o projetil ja saiu
+local TWINMOON_CHAIN_GOAL = 4           -- conjuracoes seguidas alternando
+-- Plenilunio Gemeo (lendario, Convergence Rework 02/11/2026): com o efeito principal ativo, cada magia da escola DIFERENTE
+-- da anterior soma 1 fase (+2% da escola, ate 6; regra simplificada em 06/11/2026; a primeira ja conta); repetir a mesma magia zera; a 6a vira o Eclipse Gemeo
+-- (20 s) e as fases recomecam. Sem fases durante o Eclipse. Desligar o lendario limpa tudo.
+local PLENI_MAIN = 9614101
+local PLENI_FASES = { 9614103, 9614104, 9614105, 9614106, 9614107, 9614108 }
+local PLENI_ECLIPSE = 9614109
+local pleniFase = 0
+local pleniUltima = nil
+local pleniAtivo = false
+function TwinMoon_PleniluneApply()
+    for i = 1, 6, 1 do
+        if i ~= pleniFase then act(ClearSpEffect, PLENI_FASES[i]) end
+    end
+    if pleniFase >= 6 then
+        act(ClearSpEffect, PLENI_FASES[6])
+        act(AddSpEffect, PLENI_ECLIPSE)
+        pleniFase = 0
+        pleniUltima = nil
+    elseif pleniFase > 0 then
+        act(AddSpEffect, PLENI_FASES[pleniFase])
+    end
+end
+function TwinMoon_PleniluneOnCast(opening)
+    TwinMoon_Log("magia da escola " .. tostring(LastCastMagicID) .. ", abertura " .. tostring(opening) .. " pleni_main=" .. tostring(env(GetSpEffectID, PLENI_MAIN) == TRUE))
+    if env(GetSpEffectID, PLENI_MAIN) == FALSE or env(GetSpEffectID, PLENI_ECLIPSE) == TRUE then
+        return
+    end
+    pleniAtivo = true
+    local magia = LastCastMagicID
+    if pleniUltima == nil or magia ~= pleniUltima then
+        pleniFase = math.min(pleniFase + 1, 6)
+    else
+        pleniFase = 0
+    end
+    pleniUltima = magia
+    TwinMoon_Log("plenilunio: fase " .. pleniFase)
+    TwinMoon_PleniluneApply()
+end
+function TwinMoon_PleniluneUpdate()
+    if pleniAtivo and env(GetSpEffectID, PLENI_MAIN) == FALSE then
+        pleniAtivo = false
+        pleniFase = 0
+        pleniUltima = nil
+        for i = 1, 6, 1 do act(ClearSpEffect, PLENI_FASES[i]) end
+        act(ClearSpEffect, PLENI_ECLIPSE)
+    end
+end
+-- Registro de diagnostico desligado (entrega, 06/11/2026): LOG_DIAGNOSTICO = True em tools\lc_spells.py religa
+function TwinMoon_Log(msg)
+end
+function TwinMoon_LogBeat()
+end
+-- Lendarios das Luas Gemeas, liga/desliga (v4, 03/11/2026): sem o common.emevd do CV e sem as regras genericas do Spells.hks.
+-- Conjurar aplica o "toggle check" (refId1 da magia); visto no jogador, ele troca o efeito principal (liga/desliga). Se o
+-- toggle nao aparecer ate TWINLEG_FALLBACK s depois da conjuracao, troca mesmo assim. PF da magia 0 enquanto ligado; o
+-- principal sai se a magia nao estiver em nenhum dos 14 slots. Os dois lendarios tem spCategory 155: so um por vez.
+local TWINMOON_LEGENDARIES = {
+    [6591] = { Main = 9614101, Toggle = 9614100, Fp = 30 }, -- Twin Plenilune
+    [6595] = { Main = 9614501, Toggle = 9614500, Fp = 30 }, -- Oath of Ensis
+}
+local TWINLEG_FALLBACK = 3
+local twinLegCast = {}
+local twinLegFpZero = {}
+local twinLegNextCheck = 0
+function TwinMoon_LegendaryOnCast(id)
+    if TWINMOON_LEGENDARIES[id] ~= nil then
+        twinLegCast[id] = g_DeltaTimeCount
+        TwinMoon_Log("lendario conjurado " .. tostring(id))
+    end
+end
+function TwinMoon_LegendaryEquipped(id)
+    for i = 0, 13, 1 do
+        if GetPointerValue(CHR_INS_BASE.PLAYER_GAME_DATA.EQUIP_GAME_DATA.EQUIP_MAGIC_DATA.MAGIC_SLOT(i)) == id then
+            return true
+        end
+    end
+    return false
+end
+function TwinMoon_LegendaryUpdate()
+    TwinMoon_LogBeat()
+    local checar = g_DeltaTimeCount >= twinLegNextCheck
+    if checar then twinLegNextCheck = g_DeltaTimeCount + 0.5 end
+    for id, d in pairs(TWINMOON_LEGENDARIES) do
+        local toggled = env(GetSpEffectID, d.Toggle) == TRUE
+        local cast = twinLegCast[id]
+        if toggled or (cast ~= nil and g_DeltaTimeCount - cast >= TWINLEG_FALLBACK) then
+            if toggled then act(ClearSpEffect, d.Toggle) end
+            twinLegCast[id] = nil
+            if env(GetSpEffectID, d.Main) == TRUE then
+                act(ClearSpEffect, d.Main)
+                TwinMoon_Log("lendario " .. id .. " DESLIGADO (toggle visto=" .. tostring(toggled) .. ")")
+            else
+                act(AddSpEffect, d.Main)
+                TwinMoon_Log("lendario " .. id .. " LIGADO (toggle visto=" .. tostring(toggled) .. ")")
+            end
+        end
+        local ativo = env(GetSpEffectID, d.Main) == TRUE
+        if ativo and checar and not TwinMoon_LegendaryEquipped(id) then
+            act(ClearSpEffect, d.Main)
+            TwinMoon_Log("lendario " .. id .. " desligado: magia fora dos 14 slots")
+            ativo = false
+        end
+        if ativo and not twinLegFpZero[id] then
+            SetParamValue(PARAM.Magic.FP_CONSUMPTION, id, 0)
+            twinLegFpZero[id] = true
+        elseif not ativo and twinLegFpZero[id] then
+            SetParamValue(PARAM.Magic.FP_CONSUMPTION, id, d.Fp)
+            twinLegFpZero[id] = nil
+        end
+    end
+end
+-- Juramento da Noite e da Chama (lendario, Convergence Rework 02/11/2026; v13 06/11/2026): com o principal ativo, cada pedido
+-- de golpe liga UMA janela curta (o jogo so processa uma janela "ao acertar" por golpe): o leve deixa a Marca do Luar no
+-- inimigo e o pesado a Marca da Chama. Um leve e um pesado (qualquer ordem, ate OATH_JANELA s) armam o PROXIMO golpe:
+-- janela da armada (x1,6 e o X de lua e fogo no alvo). Recarga 3 s. Armar conta como alternancia e a proxima encantacao
+-- da escola custa -50% PF (o desconto sai OATH_CLEAR_DELAY s depois da conjuracao).
+local OATH_MAIN = 9614501
+local OATH_JL = { 9614503, 9614516 }
+local OATH_JC = { 9614505, 9614518 }
+local OATH_ARMADA = { 9614511, 9614520 }
+local OATH_CUMPRIDO = 9614515
+local OATH_RECARGA = 3
+local OATH_JANELA = 10
+local OATH_CLEAR_DELAY = 1.5
+local oathLast = -100
+local oathClearAt = nil
+local oathReqL, oathReqC = nil, nil
+local oathArmado = false
+local oathArmadaAt = nil
+local oathPedidoT = nil
+function TwinMoon_OathOnAttack(is_light, is_heavy)
+    if env(GetSpEffectID, OATH_MAIN) == FALSE then
+        return
+    end
+    if not is_light and not is_heavy then
+        return
+    end
+    -- o gancho do CV chama duas vezes no mesmo quadro por pedido (visto no log): so a primeira conta
+    if oathPedidoT ~= nil and g_DeltaTimeCount - oathPedidoT < 0.05 then
+        return
+    end
+    oathPedidoT = g_DeltaTimeCount
+    TwinMoon_Log("juramento: ataque leve=" .. tostring(is_light) .. " pesado=" .. tostring(is_heavy))
+    for i = 1, 2, 1 do
+        act(ClearSpEffect, OATH_JL[i])
+        act(ClearSpEffect, OATH_JC[i])
+        act(ClearSpEffect, OATH_ARMADA[i])
+    end
+    oathArmadaAt = nil
+    if oathArmado then
+        oathArmado = false
+        oathArmadaAt = g_DeltaTimeCount
+        for i = 1, 2, 1 do act(AddSpEffect, OATH_ARMADA[i]) end
+        TwinMoon_Log("juramento: golpe ARMADO (x1,6 e o X)")
+        return
+    end
+    if is_light then
+        for i = 1, 2, 1 do act(AddSpEffect, OATH_JL[i]) end
+        oathReqL = g_DeltaTimeCount
+    else
+        for i = 1, 2, 1 do act(AddSpEffect, OATH_JC[i]) end
+        oathReqC = g_DeltaTimeCount
+    end
+    if oathReqL ~= nil and g_DeltaTimeCount - oathReqL > OATH_JANELA then oathReqL = nil end
+    if oathReqC ~= nil and g_DeltaTimeCount - oathReqC > OATH_JANELA then oathReqC = nil end
+    if oathReqL ~= nil and oathReqC ~= nil and g_DeltaTimeCount - oathLast >= OATH_RECARGA then
+        oathLast = g_DeltaTimeCount
+        oathReqL, oathReqC = nil, nil
+        oathArmado = true
+        act(AddSpEffect, OATH_CUMPRIDO)
+        TwinMoon_Register("X")
+        TwinMoon_Log("juramento: leve e pesado feitos, o proximo golpe sai armado")
+    end
+end
+function TwinMoon_OathOnSpellCast()
+    if oathClearAt == nil and env(GetSpEffectID, OATH_CUMPRIDO) == TRUE then
+        oathClearAt = g_DeltaTimeCount + OATH_CLEAR_DELAY
+    end
+end
+function TwinMoon_OathUpdate()
+    if oathArmadaAt ~= nil and g_DeltaTimeCount - oathArmadaAt > 4 then
+        for i = 1, 2, 1 do act(ClearSpEffect, OATH_ARMADA[i]) end
+        oathArmadaAt = nil
+    end
+    if oathClearAt ~= nil and g_DeltaTimeCount >= oathClearAt then
+        act(ClearSpEffect, OATH_CUMPRIDO)
+        oathClearAt = nil
+    end
+    if env(GetSpEffectID, OATH_MAIN) == FALSE then
+        oathReqL, oathReqC, oathArmado = nil, nil, false
+    end
+end
+
+-- Dicionario da escola (padrao do IncantationDictionary.hks do CV + Opening): preenchido magia a magia.
+__twinMoonSpells = {
+    [6550] = { SpEffects = nil, RestoreFpCost = nil, Opening = "L" }, -- Incandescent Crescent
+    [6551] = { SpEffects = nil, RestoreFpCost = nil, Opening = "L" }, -- Twin Moon Spark
+    [6552] = { SpEffects = nil, RestoreFpCost = nil, Opening = "C" }, -- Starlit Ember
+    [6553] = { SpEffects = nil, RestoreFpCost = nil, Opening = "C" }, -- Moon-and-Flame Touch
+    [6560] = { SpEffects = nil, RestoreFpCost = nil, Opening = "L" }, -- Twin Moon Greatsword
+    [6561] = { SpEffects = nil, RestoreFpCost = nil, Opening = "L" }, -- Blazing Phalanx
+    [6562] = { SpEffects = nil, RestoreFpCost = nil, Opening = "C" }, -- Eclipse Whirl
+    [6563] = { SpEffects = { 9611300 }, RestoreFpCost = nil, Opening = "C" }, -- Moon-and-Flame Blessing
+    [6570] = { SpEffects = nil, RestoreFpCost = nil, Opening = "L" }, -- Eclipse Piercer
+    [6571] = { SpEffects = nil, RestoreFpCost = nil, Opening = "L" }, -- Twin Moon Wave
+    [6572] = { SpEffects = nil, RestoreFpCost = nil, Opening = "C" }, -- Moonlit Serpent
+    [6573] = { SpEffects = nil, RestoreFpCost = nil, Opening = "C" }, -- Rain of Embers and Stars
+    [6580] = { SpEffects = nil, RestoreFpCost = nil, Opening = "L" }, -- Night-and-Flame Beam
+    [6581] = { SpEffects = nil, RestoreFpCost = nil, Opening = "L" }, -- Burning Moon of Ensis
+    [6583] = { SpEffects = nil, RestoreFpCost = nil, Opening = "C" }, -- Moon-and-Flame Pillars
+    [6584] = { SpEffects = nil, RestoreFpCost = nil, Opening = "L" }, -- Night-and-Flame Protection
+    [6585] = { SpEffects = nil, RestoreFpCost = nil, Opening = "C" }, -- Night-and-Flame Blessing
+    [6590] = { SpEffects = nil, RestoreFpCost = nil, Opening = "L" }, -- Twin Moons of Night and Flame
+    [6593] = { SpEffects = nil, RestoreFpCost = nil, Opening = "C" }, -- Eclipse of Ensis
+    [6594] = { SpEffects = nil, RestoreFpCost = nil, Opening = "L" }, -- Burning Constellation
+    [6591] = { SpEffects = nil, RestoreFpCost = nil, Opening = nil }, -- Twin Plenilune
+    [6595] = { SpEffects = nil, RestoreFpCost = nil, Opening = nil }, -- Oath of Ensis
+}
+
+-- Habilidades (SwordArtsParam) -> abertura; "X" = sempre o oposto da ultima (Lua Partida).
+TwinMoon_SwordArts = {
+    [377] = "L", -- Grande Lâmina do Eclipse: feixe de luar no giro, colunas de fogo na fincada (Convergence Rework)
+    [378] = "C", -- Ensis: tornado e fincada numa animacao so
+}
+
+local twinMoonLast = nil
+local twinMoonCasts = 0
+local twinMoonPendingClear = nil
+local twinMoonPendingAt = 0
+
+function TwinMoon_IsActive()
+    return env(GetSpEffectID, Jewel_of_the_Twin_Moons) == TRUE or env(GetSpEffectID, TWINMOON_GATE) == TRUE
+end
+
+function TwinMoon_Reset()
+    twinMoonLast = nil
+    twinMoonCasts = 0
+    act(ClearSpEffect, TWINMOON_MOON_READY)
+    act(ClearSpEffect, TWINMOON_FLAME_READY)
+end
+
+function TwinMoon_Register(opening)
+    if not TwinMoon_IsActive() then
+        return
+    end
+    if opening == "X" then
+        if twinMoonLast == "L" then opening = "C" else opening = "L" end
+    end
+
+    if twinMoonLast ~= nil and opening ~= twinMoonLast then
+        twinMoonCasts = twinMoonCasts + 1
+    else
+        twinMoonCasts = 1
+    end
+    twinMoonLast = opening
+
+    -- o bonus que esta conjuracao usou sai daqui a pouco; o do oposto fica pronto
+    if opening == "L" then
+        twinMoonPendingClear = TWINMOON_MOON_READY
+        act(AddSpEffect, TWINMOON_FLAME_READY)
+    else
+        twinMoonPendingClear = TWINMOON_FLAME_READY
+        act(AddSpEffect, TWINMOON_MOON_READY)
+    end
+    twinMoonPendingAt = g_DeltaTimeCount
+
+    if twinMoonCasts >= TWINMOON_CHAIN_GOAL then
+        act(AddSpEffect, TWINMOON_TWIN)
+        twinMoonCasts = 0
+    end
+end
+
+function TwinMoon_OnSpellCast()
+    TwinMoon_LegendaryOnCast(LastCastMagicID) -- Lendarios das Luas Gemeas (Convergence Rework)
+    local data = __twinMoonSpells[LastCastMagicID]
+    if data ~= nil and data.Opening ~= nil then
+        TwinMoon_PleniluneOnCast(data.Opening) -- Plenilunio Gemeo (Convergence Rework)
+        TwinMoon_OathOnSpellCast() -- Juramento de Ensis (Convergence Rework)
+        TwinMoon_Register(data.Opening)
+    end
+end
+
+function TwinMoon_OnSwordArts()
+    local opening = TwinMoon_SwordArts[c_SwordArtsID]
+    if opening ~= nil then
+        TwinMoon_Register(opening)
+    end
+end
+
+-- Posturas (habilidades com golpe leve/pesado dentro da postura): leve = Lua, pesado = Chama. A janela de golpe da postura
+-- e marcada pelo HKS do CV com os efeitos 100530/100540.
+TwinMoon_StanceArts = {
+    [178] = true, -- Eclipse Draw / Saque do Eclipse (Burning Crescent Blade; mesmo tipo do Unsheathe/Transient Moonlight)
+    [219] = true, -- Night-and-Flame Stance (Sword of Night and Flame)
+    [318] = true, -- Moon-and-Fire Stance (Rellana's Twin Blades)
+}
+
+function TwinMoon_OnStanceAttack(is_light, is_heavy)
+    TwinMoon_OathOnAttack(is_light, is_heavy) -- Juramento de Ensis (Convergence Rework)
+    if not TwinMoon_StanceArts[c_SwordArtsID] then
+        return
+    end
+    if env(GetSpEffectID, 100530) == FALSE and env(GetSpEffectID, 100540) == FALSE then
+        return
+    end
+    if is_light then
+        TwinMoon_Register("L")
+    elseif is_heavy then
+        TwinMoon_Register("C")
+    end
+end
+
+function TwinMoon_Update()
+    TwinMoon_LegendaryUpdate() -- Lendarios das Luas Gemeas (Convergence Rework)
+    TwinMoon_PleniluneUpdate() -- Plenilunio Gemeo (Convergence Rework)
+    TwinMoon_OathUpdate() -- Juramento de Ensis (Convergence Rework)
+    if twinMoonPendingClear ~= nil and g_DeltaTimeCount - twinMoonPendingAt >= TWINMOON_CLEAR_DELAY then
+        act(ClearSpEffect, twinMoonPendingClear)
+        twinMoonPendingClear = nil
+    end
+    if twinMoonLast ~= nil and not TwinMoon_IsActive() then
+        TwinMoon_Reset()
+    end
+end

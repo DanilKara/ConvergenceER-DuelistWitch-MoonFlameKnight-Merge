@@ -1,0 +1,4 @@
+*.dcx binary
+*.bin binary
+*.bnk binary
+*.hks -text
